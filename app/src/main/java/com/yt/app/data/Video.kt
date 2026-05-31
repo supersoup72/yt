@@ -7,10 +7,9 @@ data class Video(
     val views: String = "",
     val likes: String = "",
     val subs: String = "",
-    val duration: String = ""
+    val duration: String = "",
+    val channelAvatar: String = ""
 ) {
-    val thumbnailUrl: String
-        get() = "https://i.ytimg.com/vi/$id/hqdefault.jpg"
-    val watchUrl: String
-        get() = "https://www.youtube.com/watch?v=$id"
+    val thumbnailUrl: String get() = "https://i.ytimg.com/vi/$id/hqdefault.jpg"
+    val watchUrl: String get() = "https://www.youtube.com/watch?v=$id"
 }

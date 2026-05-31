@@ -3,8 +3,10 @@ package com.yt.app.ui
 import android.os.Environment
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -13,10 +15,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.yt.app.VideoRepository
 import com.yt.app.data.Video
@@ -33,170 +38,122 @@ fun VideoCard(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showMenu by remember { mutableStateOf(false) }
-    var showStats by remember { mutableStateOf(false) }
-    var stats by remember { mutableStateOf<Map<String, String>?>(null) }
     var isLiked by remember { mutableStateOf(repo.prefs.isLiked(video.id)) }
-    var downloading by remember { mutableStateOf(false) }
 
-    Card(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .combinedClickable(
-                onClick = onPlay,
-                onLongClick = { showMenu = true }
-            ),
-        shape = RoundedCornerShape(12.dp),
-        elevation = CardDefaults.cardElevation(2.dp)
+            .combinedClickable(onClick = onPlay, onLongClick = { showMenu = true })
     ) {
-        Column {
-            // Thumbnail
+        // Thumbnail with duration badge
+        Box(modifier = Modifier.fillMaxWidth()) {
             AsyncImage(
                 model = video.thumbnailUrl,
                 contentDescription = video.title,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)
             )
+            if (video.duration.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd).padding(8.dp)
+                        .background(Color(0xCC000000), RoundedCornerShape(3.dp))
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                ) {
+                    Text(video.duration, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                }
+            }
+        }
 
-            // Title + action row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
+        // Info row
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            // Channel avatar
+            Box(
+                modifier = Modifier.size(36.dp).clip(CircleShape).background(Color(0xFF444444)),
+                contentAlignment = Alignment.Center
             ) {
+                if (video.channelAvatar.isNotBlank()) {
+                    AsyncImage(model = video.channelAvatar, contentDescription = null,
+                        modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                } else {
+                    Text(video.channel.firstOrNull()?.toString() ?: "?",
+                        color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+
+            // Title + meta
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = video.title,
                     style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    color = Color.White
                 )
+                Spacer(Modifier.height(3.dp))
+                val meta = listOfNotNull(
+                    video.channel.takeIf { it.isNotBlank() },
+                    video.views.takeIf { it.isNotBlank() }
+                ).joinToString(" • ")
+                if (meta.isNotBlank()) {
+                    Text(meta, style = MaterialTheme.typography.labelSmall, color = Color(0xFFAAAAAA))
+                }
+            }
 
-                // Like button
-                IconButton(onClick = {
-                    isLiked = repo.prefs.toggleLike(video.id)
-                    val msg = if (isLiked) "Liked!" else "Removed from likes"
-                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                }) {
-                    Icon(
-                        if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        contentDescription = "Like",
-                        tint = if (isLiked) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurfaceVariant
+            // Overflow menu button
+            Box {
+                IconButton(onClick = { showMenu = true }, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "More",
+                        tint = Color(0xFFAAAAAA), modifier = Modifier.size(18.dp))
+                }
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(if (isLiked) "Unlike" else "Like") },
+                        leadingIcon = { Icon(if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            null, tint = if (isLiked) Color.Red else Color.Unspecified) },
+                        onClick = {
+                            showMenu = false
+                            isLiked = repo.prefs.toggleLike(video.id)
+                            Toast.makeText(context, if (isLiked) "Liked" else "Removed from likes",
+                                Toast.LENGTH_SHORT).show()
+                        }
                     )
-                }
-
-                // More options
-                IconButton(onClick = { showMenu = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "More")
-                }
-            }
-
-            if (video.channel.isNotBlank()) {
-                Text(
-                    text = video.channel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 12.dp, bottom = 8.dp)
-                )
-            }
-        }
-    }
-
-    // Dropdown menu (long-press)
-    DropdownMenu(
-        expanded = showMenu,
-        onDismissRequest = { showMenu = false }
-    ) {
-        DropdownMenuItem(
-            text = { Text("Play") },
-            leadingIcon = { Icon(Icons.Default.PlayArrow, null) },
-            onClick = { showMenu = false; onPlay() }
-        )
-        DropdownMenuItem(
-            text = { Text("Stats") },
-            leadingIcon = { Icon(Icons.Default.Info, null) },
-            onClick = {
-                showMenu = false
-                showStats = true
-                scope.launch {
-                    stats = repo.getStats(video.id)
-                }
-            }
-        )
-        DropdownMenuItem(
-            text = { Text("Subscribe to channel") },
-            leadingIcon = { Icon(Icons.Default.Notifications, null) },
-            onClick = {
-                showMenu = false
-                scope.launch {
-                    val url = repo.getChannelUrl(video.id)
-                    if (url != null) {
-                        val subbed = repo.prefs.toggleSub(url)
-                        val msg = if (subbed) "Subscribed!" else "Unsubscribed"
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Couldn't get channel URL", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        )
-        DropdownMenuItem(
-            text = { Text(if (downloading) "Downloading…" else "Download") },
-            leadingIcon = { Icon(Icons.Default.Download, null) },
-            enabled = !downloading,
-            onClick = {
-                showMenu = false
-                downloading = true
-                scope.launch {
-                    val dir = Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_DOWNLOADS
-                    )
-                    val ok = repo.download(video.id, dir)
-                    downloading = false
-                    Toast.makeText(
-                        context,
-                        if (ok) "Downloaded to Downloads/" else "Download failed",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-        )
-    }
-
-    // Stats dialog
-    if (showStats) {
-        AlertDialog(
-            onDismissRequest = { showStats = false },
-            title = { Text("Video Stats") },
-            text = {
-                if (stats == null) {
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-                    }
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        stats!!.forEach { (key, value) ->
-                            if (value.isNotBlank()) {
-                                Row {
-                                    Text(
-                                        "${key.replaceFirstChar { it.uppercase() }}: ",
-                                        style = MaterialTheme.typography.labelMedium
-                                    )
-                                    Text(value)
+                    DropdownMenuItem(
+                        text = { Text("Subscribe") },
+                        leadingIcon = { Icon(Icons.Default.Notifications, null) },
+                        onClick = {
+                            showMenu = false
+                            scope.launch {
+                                val cid = repo.getChannelUrl(video.id)
+                                if (cid != null) {
+                                    val subbed = repo.prefs.toggleSub(cid)
+                                    Toast.makeText(context, if (subbed) "Subscribed" else "Unsubscribed",
+                                        Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }
-                    }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Download") },
+                        leadingIcon = { Icon(Icons.Default.Download, null) },
+                        onClick = {
+                            showMenu = false
+                            scope.launch {
+                                val dir = Environment.getExternalStoragePublicDirectory(
+                                    Environment.DIRECTORY_DOWNLOADS)
+                                val ok = repo.download(video.id, dir)
+                                Toast.makeText(context, if (ok) "Downloaded" else "Download failed",
+                                    Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    )
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { showStats = false }) { Text("Close") }
             }
-        )
+        }
     }
 }

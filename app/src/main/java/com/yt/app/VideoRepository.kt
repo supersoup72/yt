@@ -10,83 +10,62 @@ class VideoRepository(context: Context) {
 
     val prefs = Prefs(context)
 
-    private fun VideoResult.toVideo() = Video(
-        id = id, title = title, channel = channel, views = views
-    )
-
+    private fun YtWebClient.VideoResult.toVideo() = Video(id, title, channel, views, duration = duration, channelAvatar = channelAvatar)
     private fun List<YtWebClient.VideoResult>.toVideos() = map { it.toVideo() }
 
-    suspend fun search(query: String): List<Video> = withContext(Dispatchers.IO) {
-        YtWebClient.search(query).toVideos()
-    }
+    suspend fun search(query: String) = withContext(Dispatchers.IO) { YtWebClient.search(query).toVideos() }
 
     suspend fun searchWithDebug(query: String): Pair<List<Video>, String> = withContext(Dispatchers.IO) {
-        val results = YtWebClient.search(query)
-        val debug = if (results.isEmpty()) "Innertube returned 0 results for: $query" else ""
-        Pair(results.toVideos(), debug)
+        val r = YtWebClient.search(query)
+        Pair(r.toVideos(), if (r.isEmpty()) "Innertube returned 0 results" else "")
     }
 
     suspend fun getHomeFeed(): List<Video> = withContext(Dispatchers.IO) {
         val history = prefs.getHistory()
-        if (history.isEmpty()) {
-            YtWebClient.search("trending music").toVideos()
-        } else {
-            // Use last watched video to get related
-            YtWebClient.getRelated(history.first()).toVideos()
-        }
+        if (history.isEmpty()) YtWebClient.search("trending music").toVideos()
+        else YtWebClient.getRelated(history.first()).toVideos()
     }
 
     suspend fun getChannelFeed(): List<Video> = withContext(Dispatchers.IO) {
-        val subs = prefs.getSubs() // stored as channelIds now
-        subs.flatMap { channelId ->
-            YtWebClient.getChannelVideos(channelId).toVideos()
-        }
+        prefs.getSubs().flatMap { YtWebClient.getChannelVideos(it).toVideos() }
     }
 
     suspend fun getLikedVideos(): List<Video> = withContext(Dispatchers.IO) {
-        prefs.getLikes().mapNotNull { id ->
-            val stats = YtWebClient.getStats(id)
-            if (stats["title"]?.isNotBlank() == true)
-                Video(id = id, title = stats["title"] ?: id, channel = stats["channel"] ?: "")
-            else Video(id = id, title = id)
+        prefs.getLikes().map { id ->
+            val d = YtWebClient.getVideoDetail(id)
+            if (d != null) Video(id, d.title, d.channelName, d.viewCount)
+            else Video(id, id)
         }
     }
 
-    suspend fun getRelated(videoId: String): List<Video> = withContext(Dispatchers.IO) {
-        YtWebClient.getRelated(videoId).toVideos()
+    suspend fun getRelated(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getRelated(videoId).toVideos() }
+
+    suspend fun getVideoDetail(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getVideoDetail(videoId) }
+
+    suspend fun getComments(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getComments(videoId) }
+
+    suspend fun getQualities(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getQualities(videoId) }
+
+    suspend fun getStreamUrl(videoId: String, preferredHeight: Int = 0) = withContext(Dispatchers.IO) {
+        YtWebClient.getStreamUrl(videoId, preferredHeight)
     }
 
-    suspend fun getStreamUrl(videoId: String): String? = withContext(Dispatchers.IO) {
-        YtWebClient.getStreamUrl(videoId)
-    }
+    suspend fun getStats(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getStats(videoId) }
 
-    suspend fun getStats(videoId: String): Map<String, String> = withContext(Dispatchers.IO) {
-        YtWebClient.getStats(videoId)
-    }
-
-    suspend fun getChannelUrl(videoId: String): String? = withContext(Dispatchers.IO) {
-        // Return videoId as channel reference (stats has channel name, not ID)
-        val stats = YtWebClient.getStats(videoId)
-        stats["channel"]
+    suspend fun getChannelUrl(videoId: String) = withContext(Dispatchers.IO) {
+        YtWebClient.getVideoDetail(videoId)?.channelId
     }
 
     suspend fun download(videoId: String, outputDir: java.io.File): Boolean = withContext(Dispatchers.IO) {
-        // Download via stream URL
         val streamUrl = YtWebClient.getStreamUrl(videoId) ?: return@withContext false
         try {
-            val url = java.net.URL(streamUrl)
-            val conn = url.openConnection() as java.net.HttpURLConnection
+            val conn = java.net.URL(streamUrl).openConnection() as java.net.HttpURLConnection
             conn.connect()
             val outFile = java.io.File(outputDir, "$videoId.mp4")
-            conn.inputStream.use { input ->
-                outFile.outputStream().use { output -> input.copyTo(output) }
-            }
+            conn.inputStream.use { i -> outFile.outputStream().use { o -> i.copyTo(o) } }
             conn.disconnect()
             prefs.addDownload(videoId)
             true
         } catch (e: Exception) { false }
     }
 }
-
-// Extension to use VideoResult type alias cleanly
-private typealias VideoResult = YtWebClient.VideoResult

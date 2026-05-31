@@ -121,7 +121,7 @@ fun SearchScreen(repo: VideoRepository) {
                         VideoCard(
                             video = video,
                             repo = repo,
-                            onPlay = { com.yt.app.PlayerActivity.start(context, video.id, video.title) },
+                            onPlay = { com.yt.app.VideoDetailActivity.start(context, video) },
                             onRelated = {}
                         )
                     }
