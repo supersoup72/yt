@@ -10,7 +10,7 @@ object YtWebClient {
 
     private const val TAG = "YtWebClient"
     private const val BASE = "https://www.youtube.com/youtubei/v1"
-    private val CONTEXT = JSONObject("""{"client":{"clientName":"WEB","clientVersion":"2.20240101","hl":"en","gl":"US"}}""")
+    private val CONTEXT_WEB = JSONObject("""{"client":{"clientName":"WEB","clientVersion":"2.20240101","hl":"en","gl":"US"}}""")
 
     private var cachedVisitorData: String? = null
     var lastStreamError: String = ""
@@ -25,7 +25,7 @@ object YtWebClient {
             conn.setRequestProperty("X-Goog-Api-Format-Version", "2")
             conn.doOutput = true
             conn.connectTimeout = 15000
-            conn.readTimeout = 15000
+            conn.readTimeout = 20000
             conn.outputStream.write(body.toString().toByteArray())
             val response = conn.inputStream.bufferedReader().readText()
             conn.disconnect()
@@ -52,14 +52,21 @@ object YtWebClient {
 
     fun search(query: String): List<VideoResult> {
         val body = JSONObject().apply {
-            put("context", CONTEXT); put("query", query); put("params", "EgIQAQ==")
+            put("context", CONTEXT_WEB); put("query", query); put("params", "EgIQAQ==")
         }
         return post("search", body)?.let { parseSearchResults(it) } ?: emptyList()
     }
 
-    // ── Stream URL (tries multiple clients) ───────────────────────────────────
+    // ── Stream URL ────────────────────────────────────────────────────────────
+    // Returns StreamInfo with separate video+audio URLs for high quality DASH playback
 
-    fun getStreamUrl(videoId: String, preferredHeight: Int = 0): String? {
+    data class StreamInfo(
+        val videoUrl: String,
+        val audioUrl: String?,   // null = videoUrl already has audio (combined)
+        val height: Int
+    )
+
+    fun getStreamInfo(videoId: String): StreamInfo? {
         if (cachedVisitorData == null) cachedVisitorData = fetchVisitorData()
         val vd = cachedVisitorData ?: ""
 
@@ -94,20 +101,84 @@ object YtWebClient {
                 lastStreamError = "${cfg.name}: no streamingData status=${status?.optString("status")} reason=${status?.optString("reason")}"
                 continue
             }
-            val url = extractUrl(json, preferredHeight)
-            if (url != null) return url
-            lastStreamError = "${cfg.name}: streamingData present but no direct mp4 url"
+            val info = extractStreamInfo(json)
+            if (info != null) { Log.d(TAG, "Stream from ${cfg.name} ${info.height}p audio=${info.audioUrl != null}"); return info }
+            lastStreamError = "${cfg.name}: streamingData present but no usable urls"
         }
         return null
     }
 
-    // Returns list of available quality options: Pair(label, url)
+    // Legacy single-url getter used by quality picker
+    fun getStreamUrl(videoId: String, preferredHeight: Int = 0): String? = getStreamInfo(videoId)?.videoUrl
+
+    private fun extractStreamInfo(json: JSONObject): StreamInfo? {
+        return try {
+            val sd = json.getJSONObject("streamingData")
+            val formats         = sd.optJSONArray("formats")
+            val adaptiveFormats = sd.optJSONArray("adaptiveFormats")
+
+            // Collect combined (video+audio) streams
+            data class Fmt(val height: Int, val url: String, val mime: String, val bitrate: Int)
+            val combined = mutableListOf<Fmt>()
+            val videoOnly = mutableListOf<Fmt>()
+            val audioOnly = mutableListOf<Fmt>()
+
+            fun collectFmt(arr: JSONArray?, bucket: MutableList<Fmt>) {
+                if (arr == null) return
+                for (i in 0 until arr.length()) {
+                    val f = arr.getJSONObject(i)
+                    val mime = f.optString("mimeType","")
+                    val url  = f.optString("url",""); if (url.isBlank()) continue
+                    val h    = f.optInt("height", 0)
+                    val br   = f.optInt("bitrate", 0)
+                    bucket.add(Fmt(h, url, mime, br))
+                }
+            }
+            collectFmt(formats, combined)
+            // adaptiveFormats: video-only has height>0, audio-only has height==0
+            val adaptive = mutableListOf<Fmt>()
+            collectFmt(adaptiveFormats, adaptive)
+            for (f in adaptive) {
+                if (f.height > 0) videoOnly.add(f)
+                else if (f.mime.startsWith("audio/")) audioOnly.add(f)
+            }
+
+            // Best combined (fallback, has audio but max 720p usually)
+            val bestCombined = combined.filter { it.mime.startsWith("video/mp4") && it.url.isNotBlank() }
+                .maxByOrNull { it.height }
+
+            // Best adaptive video (can be 1080p/1440p)
+            val bestVideo = videoOnly.filter { it.mime.startsWith("video/mp4") && it.url.isNotBlank() }
+                .maxByOrNull { it.height }
+
+            // Best adaptive audio (prefer mp4/aac over webm)
+            val bestAudio = audioOnly
+                .filter { it.url.isNotBlank() }
+                .sortedWith(compareByDescending<Fmt> { it.mime.contains("mp4") }.thenByDescending { it.bitrate })
+                .firstOrNull()
+
+            when {
+                // Prefer adaptive video+audio (best quality with sound)
+                bestVideo != null && bestAudio != null ->
+                    StreamInfo(bestVideo.url, bestAudio.url, bestVideo.height)
+                // Fallback: combined stream (360p/720p but has audio)
+                bestCombined != null ->
+                    StreamInfo(bestCombined.url, null, bestCombined.height)
+                // Last resort: video only
+                bestVideo != null ->
+                    StreamInfo(bestVideo.url, null, bestVideo.height)
+                else -> null
+            }
+        } catch (e: Exception) { Log.e(TAG,"extractStreamInfo: ${e.message}"); null }
+    }
+
+    // Quality options — returns all heights with their video+audio urls
     fun getQualities(videoId: String): List<QualityOption> {
         if (cachedVisitorData == null) cachedVisitorData = fetchVisitorData()
         val vd = cachedVisitorData ?: ""
         val clientObj = JSONObject().apply {
-            put("clientName", "ANDROID_VR"); put("clientVersion", "1.56.21")
-            put("hl", "en"); put("gl", "US"); put("androidSdkVersion", 34)
+            put("clientName","ANDROID_VR"); put("clientVersion","1.56.21")
+            put("hl","en"); put("gl","US"); put("androidSdkVersion", 34)
             if (vd.isNotBlank()) put("visitorData", vd)
         }
         val body = JSONObject().apply {
@@ -117,136 +188,102 @@ object YtWebClient {
         val ua = "Mozilla/5.0 (Linux; Android 14; Oculus Quest) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"
         val json = post("player", body, ua) ?: return emptyList()
         if (!json.has("streamingData")) return emptyList()
-        val options = mutableListOf<QualityOption>()
-        val seen = mutableSetOf<Int>()
         val sd = json.getJSONObject("streamingData")
 
-        // Scan combined formats first (have audio) — mark them
+        // Get best audio URL to pair with each video quality
+        val audioUrl = sd.optJSONArray("adaptiveFormats")?.let { arr ->
+            (0 until arr.length()).map { arr.getJSONObject(it) }
+                .filter { it.optString("url","").isNotBlank() && it.optInt("height",0) == 0 }
+                .filter { it.optString("mimeType","").contains("mp4") || it.optString("mimeType","").contains("aac") }
+                .maxByOrNull { it.optInt("bitrate",0) }
+                ?.optString("url","")
+        }
+
+        val options = mutableListOf<QualityOption>()
+        val seen = mutableSetOf<Int>()
+
+        // Combined formats (already have audio)
         sd.optJSONArray("formats")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val f = arr.getJSONObject(i)
-                if (!f.optString("mimeType").startsWith("video/mp4")) continue
-                val url = f.optString("url", ""); if (url.isBlank()) continue
+                if (!f.optString("mimeType","").startsWith("video/mp4")) continue
+                val url = f.optString("url",""); if (url.isBlank()) continue
                 val h = f.optInt("height", 0); if (h == 0 || seen.contains(h)) continue
-                seen.add(h); options.add(QualityOption("${h}p", h, url, hasAudio = true))
+                seen.add(h)
+                options.add(QualityOption("${h}p", h, url, audioUrl = null, hasAudio = true))
             }
         }
-        // Also add adaptive heights not already listed (video-only, but higher res)
+        // Adaptive video formats — pair with audio
         sd.optJSONArray("adaptiveFormats")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val f = arr.getJSONObject(i)
-                if (!f.optString("mimeType").startsWith("video/mp4")) continue
-                val url = f.optString("url", ""); if (url.isBlank()) continue
+                if (!f.optString("mimeType","").startsWith("video/mp4")) continue
+                val url = f.optString("url",""); if (url.isBlank()) continue
                 val h = f.optInt("height", 0); if (h == 0 || seen.contains(h)) continue
-                seen.add(h); options.add(QualityOption("${h}p ♪", h, url, hasAudio = false))
+                seen.add(h)
+                // Pair with audio url — ExoPlayer will merge them
+                options.add(QualityOption("${h}p", h, url, audioUrl = audioUrl, hasAudio = audioUrl != null))
             }
         }
         return options.sortedByDescending { it.height }
     }
 
-    private fun extractUrl(json: JSONObject, preferredHeight: Int = 0): String? {
-        return try {
-            val sd = json.getJSONObject("streamingData")
-
-            // `formats` = combined audio+video streams (always prefer these)
-            // `adaptiveFormats` = video-only or audio-only (no sound if picked alone)
-            val combined = mutableListOf<Pair<Int,String>>()
-            val adaptive = mutableListOf<Pair<Int,String>>()
-
-            fun scan(arr: JSONArray?, bucket: MutableList<Pair<Int,String>>) {
-                if (arr == null) return
-                for (i in 0 until arr.length()) {
-                    val f = arr.getJSONObject(i)
-                    val mime = f.optString("mimeType", "")
-                    // Only combined streams have both video+audio; skip audio-only adaptive
-                    if (!mime.startsWith("video/mp4")) continue
-                    val u = f.optString("url", ""); if (u.isBlank()) continue
-                    bucket.add(Pair(f.optInt("height", 0), u))
-                }
-            }
-
-            scan(sd.optJSONArray("formats"), combined)
-            scan(sd.optJSONArray("adaptiveFormats"), adaptive)
-
-            // Always pick from combined first (has audio), fall back to adaptive only if none
-            val pool = if (combined.isNotEmpty()) combined else adaptive
-            if (pool.isEmpty()) return null
-
-            if (preferredHeight > 0) {
-                pool.minByOrNull { Math.abs(it.first - preferredHeight) }?.second
-            } else {
-                pool.maxByOrNull { it.first }?.second
-            }
-        } catch (e: Exception) { null }
-    }
-
-    // ── Video detail (title, channel, views, description, likes) ─────────────
+    // ── Video detail ──────────────────────────────────────────────────────────
 
     fun getVideoDetail(videoId: String): VideoDetail? {
-        val body = JSONObject().apply { put("context", CONTEXT); put("videoId", videoId) }
+        val body = JSONObject().apply { put("context", CONTEXT_WEB); put("videoId", videoId) }
         val json = post("player", body) ?: return null
         return try {
             val d = json.getJSONObject("videoDetails")
-            VideoDetail(
-                id = videoId,
-                title = d.optString("title"),
-                channelId = d.optString("channelId"),
-                channelName = d.optString("author"),
-                viewCount = d.optString("viewCount"),
-                description = d.optString("shortDescription"),
-                lengthSeconds = d.optString("lengthSeconds"),
-                isLive = d.optBoolean("isLiveContent", false)
-            )
+            VideoDetail(videoId, d.optString("title"), d.optString("channelId"),
+                d.optString("author"), d.optString("viewCount"),
+                d.optString("shortDescription"), d.optString("lengthSeconds"),
+                d.optBoolean("isLiveContent", false))
         } catch (e: Exception) { null }
     }
 
     // ── Comments ──────────────────────────────────────────────────────────────
 
     fun getComments(videoId: String): List<Comment> {
-        val body = JSONObject().apply { put("context", CONTEXT); put("videoId", videoId) }
+        // Use /next to get the page, then find the comments section continuation token
+        val body = JSONObject().apply { put("context", CONTEXT_WEB); put("videoId", videoId) }
         val json = post("next", body) ?: return emptyList()
 
-        // Comments token lives inside engagementPanels — find the one with "comments" in its id
-        val token = findCommentsPanelToken(json) ?: return emptyList()
+        val token = findCommentsToken(json)
+        if (token == null) { Log.w(TAG, "No comments token found"); return emptyList() }
 
-        val body2 = JSONObject().apply { put("context", CONTEXT); put("continuation", token) }
+        // Fetch the comments using the token
+        val body2 = JSONObject().apply { put("context", CONTEXT_WEB); put("continuation", token) }
         val json2 = post("next", body2) ?: return emptyList()
         return parseComments(json2)
     }
 
-    private fun findCommentsPanelToken(json: JSONObject): String? {
-        // YouTube puts comments in engagementPanels array
-        // Each panel has a panelIdentifier — we want "engagement-panel-comments-section"
-        try {
-            val panels = json.optJSONArray("engagementPanels") ?: return null
-            for (i in 0 until panels.length()) {
-                val panel = panels.getJSONObject(i)
-                    .optJSONObject("engagementPanelSectionListRenderer") ?: continue
-                val id = panel.optString("panelIdentifier", "")
-                if (!id.contains("comment", ignoreCase = true)) continue
-                // Found comments panel — now dig for the continuation token inside
-                var token: String? = null
-                fun walkForToken(obj: Any) {
-                    if (token != null) return
-                    when (obj) {
-                        is JSONObject -> {
-                            val t = obj.optJSONObject("reloadContinuationData")
-                                ?.optString("continuation", "")
-                                ?.takeIf { it.isNotBlank() }
-                                ?: obj.optJSONObject("continuationCommand")
-                                    ?.optString("token", "")
-                                    ?.takeIf { it.isNotBlank() }
-                            if (t != null) { token = t; return }
-                            obj.keys().forEach { k -> walkForToken(obj.get(k)) }
-                        }
-                        is JSONArray -> for (j in 0 until obj.length()) walkForToken(obj.get(j))
-                    }
+    private fun findCommentsToken(json: JSONObject): String? {
+        // Walk ALL continuation tokens and pick the one that looks like a comments token
+        // Comments tokens typically start with "Eg0" or contain specific patterns
+        val tokens = mutableListOf<String>()
+        fun walk(obj: Any) {
+            when (obj) {
+                is JSONObject -> {
+                    // reloadContinuationData style
+                    obj.optJSONObject("reloadContinuationData")?.optString("continuation","")
+                        ?.takeIf { it.isNotBlank() }?.let { tokens.add(it) }
+                    // continuationCommand style
+                    obj.optJSONObject("continuationCommand")?.optString("token","")
+                        ?.takeIf { it.isNotBlank() }?.let { tokens.add(it) }
+                    obj.keys().forEach { k -> walk(obj.get(k)) }
                 }
-                walkForToken(panel)
-                if (token != null) return token
+                is JSONArray -> for (i in 0 until obj.length()) walk(obj.get(i))
             }
-        } catch (e: Exception) { Log.e(TAG, "findCommentsPanelToken: ${e.message}") }
-        return null
+        }
+        try { walk(json) } catch (e: Exception) { }
+        Log.d(TAG, "Found ${tokens.size} continuation tokens")
+        // Comments tokens are typically the 2nd or 3rd token found (after related video tokens)
+        // They're longer and start differently from related video tokens
+        // Filter: comments tokens are usually >100 chars
+        val commentTokens = tokens.filter { it.length > 100 }
+        Log.d(TAG, "Comment-like tokens: ${commentTokens.size}")
+        return commentTokens.lastOrNull() ?: tokens.lastOrNull()
     }
 
     private fun parseComments(json: JSONObject): List<Comment> {
@@ -260,7 +297,8 @@ object YtWebClient {
                         val author = cr.optJSONObject("authorText")?.optString("simpleText") ?: ""
                         val text = cr.optJSONObject("contentText")?.optJSONArray("runs")
                             ?.let { runs -> (0 until runs.length()).joinToString("") {
-                                runs.getJSONObject(it).optString("text") } } ?: ""
+                                runs.getJSONObject(it).optString("text") } }
+                            ?: cr.optJSONObject("contentText")?.optString("simpleText") ?: ""
                         val likes = cr.optJSONObject("voteCount")?.optString("simpleText") ?: ""
                         val avatar = cr.optJSONObject("authorThumbnail")
                             ?.optJSONArray("thumbnails")?.optJSONObject(0)?.optString("url") ?: ""
@@ -273,13 +311,14 @@ object YtWebClient {
             }
         }
         try { walk(json) } catch (e: Exception) { Log.e(TAG, "parseComments: ${e.message}") }
+        Log.d(TAG, "Parsed ${results.size} comments")
         return results
     }
 
     // ── Related ───────────────────────────────────────────────────────────────
 
     fun getRelated(videoId: String): List<VideoResult> {
-        val body = JSONObject().apply { put("context", CONTEXT); put("videoId", videoId) }
+        val body = JSONObject().apply { put("context", CONTEXT_WEB); put("videoId", videoId) }
         return post("next", body)?.let { parseRelatedResults(it) } ?: emptyList()
     }
 
@@ -287,16 +326,16 @@ object YtWebClient {
 
     fun getChannelVideos(channelId: String): List<VideoResult> {
         val body = JSONObject().apply {
-            put("context", CONTEXT); put("browseId", channelId)
+            put("context", CONTEXT_WEB); put("browseId", channelId)
             put("params", "EgZ2aWRlb3PyBgQKAjoA")
         }
         return post("browse", body)?.let { parseChannelResults(it) } ?: emptyList()
     }
 
     fun getStats(videoId: String): Map<String, String> {
-        val detail = getVideoDetail(videoId) ?: return emptyMap()
-        return mapOf("title" to detail.title, "channel" to detail.channelName,
-                     "views" to detail.viewCount, "subs" to "", "likes" to "")
+        val d = getVideoDetail(videoId) ?: return emptyMap()
+        return mapOf("title" to d.title, "channel" to d.channelName, "views" to d.viewCount,
+                     "subs" to "", "likes" to "")
     }
 
     // ── Parsers ───────────────────────────────────────────────────────────────
@@ -340,7 +379,8 @@ object YtWebClient {
             when (obj) {
                 is JSONObject -> {
                     val vr = obj.optJSONObject("gridVideoRenderer")
-                        ?: obj.optJSONObject("richItemRenderer")?.optJSONObject("content")?.optJSONObject("videoRenderer")
+                        ?: obj.optJSONObject("richItemRenderer")?.optJSONObject("content")
+                            ?.optJSONObject("videoRenderer")
                     if (vr != null) {
                         val id = vr.optString("videoId").takeIf { it.isNotBlank() }
                         val title = vr.optJSONObject("title")?.optJSONArray("runs")
@@ -359,17 +399,13 @@ object YtWebClient {
 
     private fun parseRelatedResults(json: JSONObject): List<VideoResult> {
         val results = mutableListOf<VideoResult>()
-        // YouTube uses several renderer names for related videos
-        val rendererKeys = setOf("compactVideoRenderer", "videoRenderer", "endScreenVideoRenderer", "gridVideoRenderer")
+        val rendererKeys = setOf("compactVideoRenderer","videoRenderer","endScreenVideoRenderer","gridVideoRenderer")
         fun walk(obj: Any) {
             if (results.size >= 20) return
             when (obj) {
                 is JSONObject -> {
                     var cr: JSONObject? = null
-                    for (key in rendererKeys) {
-                        cr = obj.optJSONObject(key)
-                        if (cr != null) break
-                    }
+                    for (key in rendererKeys) { cr = obj.optJSONObject(key); if (cr != null) break }
                     if (cr != null) {
                         val id = cr.optString("videoId").takeIf { it.isNotBlank() }
                         val title = cr.optJSONObject("title")?.optString("simpleText")
@@ -389,23 +425,21 @@ object YtWebClient {
                 is JSONArray -> for (i in 0 until obj.length()) walk(obj.get(i))
             }
         }
-        try { walk(json) } catch (e: Exception) { Log.e(TAG, "parseRelated: ${e.message}") }
+        try { walk(json) } catch (e: Exception) {}
         return results
     }
 
     // ── Data classes ──────────────────────────────────────────────────────────
 
-    data class VideoResult(
-        val id: String, val title: String, val channel: String = "",
-        val views: String = "", val duration: String = "", val channelAvatar: String = ""
-    )
+    data class VideoResult(val id: String, val title: String, val channel: String = "",
+        val views: String = "", val duration: String = "", val channelAvatar: String = "")
 
-    data class VideoDetail(
-        val id: String, val title: String, val channelId: String,
-        val channelName: String, val viewCount: String,
-        val description: String, val lengthSeconds: String, val isLive: Boolean
-    )
+    data class VideoDetail(val id: String, val title: String, val channelId: String,
+        val channelName: String, val viewCount: String, val description: String,
+        val lengthSeconds: String, val isLive: Boolean)
 
     data class Comment(val author: String, val text: String, val likes: String, val avatarUrl: String)
-    data class QualityOption(val label: String, val height: Int, val url: String, val hasAudio: Boolean = true)
+
+    data class QualityOption(val label: String, val height: Int, val url: String,
+        val audioUrl: String? = null, val hasAudio: Boolean = true)
 }

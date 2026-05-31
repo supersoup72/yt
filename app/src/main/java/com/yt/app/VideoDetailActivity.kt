@@ -40,6 +40,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
@@ -55,6 +57,7 @@ class VideoDetailActivity : ComponentActivity() {
 
     private lateinit var player: ExoPlayer
     private lateinit var repo: VideoRepository
+    private lateinit var httpDataSourceFactory: DefaultHttpDataSource.Factory
     private var videoId: String = ""
 
     // Shared player instance across portrait/landscape via companion
@@ -99,6 +102,9 @@ class VideoDetailActivity : ComponentActivity() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpDs))
             .build()
 
+        // Store httpDs for reuse in loadStream
+        this.httpDataSourceFactory = httpDs
+
         if (startFullscreen) enterFullscreen()
 
         setContent {
@@ -122,29 +128,55 @@ class VideoDetailActivity : ComponentActivity() {
         lifecycleScope.launch { loadStream(videoId) }
     }
 
-    private suspend fun loadStream(videoId: String, directUrl: String? = null) {
-        val url = directUrl ?: repo.getStreamUrl(videoId)
+    private suspend fun loadStream(videoId: String, videoUrl: String? = null, audioUrl: String? = null) {
+        val pos = player.currentPosition.takeIf { it > 0 } ?: 0L
+
+        // If URLs provided directly (from quality picker), use them
+        // Otherwise fetch from API
+        val vUrl: String?
+        val aUrl: String?
+        if (videoUrl != null) {
+            vUrl = videoUrl; aUrl = audioUrl
+        } else {
+            val info = repo.getStreamInfo(videoId)
+            vUrl = info?.videoUrl; aUrl = info?.audioUrl
+        }
+
         withContext(Dispatchers.Main) {
-            if (url != null) {
-                val pos = player.currentPosition
-                player.setMediaItem(MediaItem.fromUri(url))
-                player.prepare()
-                if (pos > 0) player.seekTo(pos)
-                player.playWhenReady = true
-            } else {
+            if (vUrl == null) {
                 android.app.AlertDialog.Builder(this@VideoDetailActivity)
                     .setTitle("Stream Error")
                     .setMessage(YtWebClient.lastStreamError.ifBlank { "Could not load video." })
                     .setPositiveButton("OK") { _, _ -> }
                     .show()
+                return@withContext
+            }
+            player.stop()
+            try {
+                val dsFactory = httpDataSourceFactory
+                val videoSource = ProgressiveMediaSource.Factory(dsFactory)
+                    .createMediaSource(MediaItem.fromUri(vUrl))
+                if (aUrl != null) {
+                    val audioSource = ProgressiveMediaSource.Factory(dsFactory)
+                        .createMediaSource(MediaItem.fromUri(aUrl))
+                    player.setMediaSource(MergingMediaSource(videoSource, audioSource))
+                } else {
+                    player.setMediaSource(videoSource)
+                }
+                player.prepare()
+                if (pos > 0) player.seekTo(pos)
+                player.playWhenReady = true
+            } catch (e: Exception) {
+                // Fallback to simple MediaItem
+                player.setMediaItem(MediaItem.fromUri(vUrl))
+                player.prepare()
+                player.playWhenReady = true
             }
         }
     }
 
-    // Called from quality sheet with the direct URL for that quality
-    fun reloadWithUrl(url: String) {
-        player.stop()
-        lifecycleScope.launch { loadStream(videoId, url) }
+    fun reloadWithQualityOption(videoUrl: String, audioUrl: String?) {
+        lifecycleScope.launch { loadStream(videoId, videoUrl, audioUrl) }
     }
 
     private fun enterFullscreen() {
@@ -454,8 +486,7 @@ fun VideoDetailScreen(
                         },
                         modifier = Modifier.clickable {
                             showQualitySheet = false
-                            // Use the direct URL from the quality option — no re-fetch needed
-                            activity?.reloadWithUrl(q.url)
+                            activity?.reloadWithQualityOption(q.url, q.audioUrl)
                         },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent)
                     )

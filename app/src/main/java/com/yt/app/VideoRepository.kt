@@ -10,26 +10,34 @@ class VideoRepository(context: Context) {
 
     val prefs = Prefs(context)
 
-    private fun YtWebClient.VideoResult.toVideo() = Video(id, title, channel, views, duration = duration, channelAvatar = channelAvatar)
+    private fun YtWebClient.VideoResult.toVideo() =
+        Video(id, title, channel, views, duration = duration, channelAvatar = channelAvatar)
     private fun List<YtWebClient.VideoResult>.toVideos() = map { it.toVideo() }
 
-    suspend fun search(query: String) = withContext(Dispatchers.IO) { YtWebClient.search(query).toVideos() }
+    suspend fun search(query: String) = withContext(Dispatchers.IO) {
+        YtWebClient.search(query).toVideos()
+    }
 
     suspend fun searchWithDebug(query: String): Pair<List<Video>, String> = withContext(Dispatchers.IO) {
         val r = YtWebClient.search(query)
         Pair(r.toVideos(), if (r.isEmpty()) "Innertube returned 0 results" else "")
     }
 
+    // Home feed from all recently watched videos
     suspend fun getHomeFeed(): List<Video> = withContext(Dispatchers.IO) {
         val history = prefs.getHistory()
         if (history.isEmpty()) {
             YtWebClient.search("trending music videos 2024").toVideos()
         } else {
-            // Try related from most recent watched video
-            val related = YtWebClient.getRelated(history.first()).toVideos()
-            // If related is empty, search based on last watched title
-            if (related.isNotEmpty()) related
-            else YtWebClient.search("trending").toVideos()
+            val seen = mutableSetOf<String>().also { it.addAll(history) }
+            val results = mutableListOf<Video>()
+            for (id in history.take(5)) {
+                for (v in YtWebClient.getRelated(id).toVideos()) {
+                    if (v.id !in seen) { seen.add(v.id); results.add(v) }
+                }
+                if (results.size >= 20) break
+            }
+            if (results.isNotEmpty()) results else YtWebClient.search("trending").toVideos()
         }
     }
 
@@ -40,33 +48,46 @@ class VideoRepository(context: Context) {
     suspend fun getLikedVideos(): List<Video> = withContext(Dispatchers.IO) {
         prefs.getLikes().map { id ->
             val d = YtWebClient.getVideoDetail(id)
-            if (d != null) Video(id, d.title, d.channelName, d.viewCount)
-            else Video(id, id)
+            if (d != null) Video(id, d.title, d.channelName, d.viewCount) else Video(id, id)
         }
     }
 
-    suspend fun getRelated(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getRelated(videoId).toVideos() }
+    suspend fun getRelated(videoId: String) = withContext(Dispatchers.IO) {
+        YtWebClient.getRelated(videoId).toVideos()
+    }
 
-    suspend fun getVideoDetail(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getVideoDetail(videoId) }
+    suspend fun getVideoDetail(videoId: String) = withContext(Dispatchers.IO) {
+        YtWebClient.getVideoDetail(videoId)
+    }
 
-    suspend fun getComments(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getComments(videoId) }
+    suspend fun getComments(videoId: String) = withContext(Dispatchers.IO) {
+        YtWebClient.getComments(videoId)
+    }
 
-    suspend fun getQualities(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getQualities(videoId) }
+    suspend fun getQualities(videoId: String) = withContext(Dispatchers.IO) {
+        YtWebClient.getQualities(videoId)
+    }
+
+    suspend fun getStreamInfo(videoId: String) = withContext(Dispatchers.IO) {
+        YtWebClient.getStreamInfo(videoId)
+    }
 
     suspend fun getStreamUrl(videoId: String, preferredHeight: Int = 0) = withContext(Dispatchers.IO) {
         YtWebClient.getStreamUrl(videoId, preferredHeight)
     }
 
-    suspend fun getStats(videoId: String) = withContext(Dispatchers.IO) { YtWebClient.getStats(videoId) }
+    suspend fun getStats(videoId: String) = withContext(Dispatchers.IO) {
+        YtWebClient.getStats(videoId)
+    }
 
     suspend fun getChannelUrl(videoId: String) = withContext(Dispatchers.IO) {
         YtWebClient.getVideoDetail(videoId)?.channelId
     }
 
     suspend fun download(videoId: String, outputDir: java.io.File): Boolean = withContext(Dispatchers.IO) {
-        val streamUrl = YtWebClient.getStreamUrl(videoId) ?: return@withContext false
+        val info = YtWebClient.getStreamInfo(videoId) ?: return@withContext false
         try {
-            val conn = java.net.URL(streamUrl).openConnection() as java.net.HttpURLConnection
+            val conn = java.net.URL(info.videoUrl).openConnection() as java.net.HttpURLConnection
             conn.connect()
             val outFile = java.io.File(outputDir, "$videoId.mp4")
             conn.inputStream.use { i -> outFile.outputStream().use { o -> i.copyTo(o) } }
