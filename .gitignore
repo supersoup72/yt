@@ -1,0 +1,16 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Don't commit the actual binary - it's downloaded by CI
+app/src/main/assets/yt-dlp
+
+# Keep the placeholder
+!app/src/main/assets/yt-dlp.placeholder

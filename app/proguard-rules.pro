@@ -1,0 +1,3 @@
+-keep class com.yt.app.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**

@@ -1,0 +1,9 @@
+This file is a placeholder.
+
+The yt-dlp ARM64 binary is downloaded automatically by GitHub Actions during the build.
+See .github/workflows/build.yml for details.
+
+If building locally, download it manually:
+  curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64 \
+       -o app/src/main/assets/yt-dlp
+  chmod +x app/src/main/assets/yt-dlp
