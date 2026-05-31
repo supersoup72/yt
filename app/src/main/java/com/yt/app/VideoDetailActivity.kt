@@ -395,7 +395,8 @@ fun VideoDetailScreen(
                 qualities.forEach { q ->
                     ListItem(
                         headlineContent = { Text(q.label) },
-                        leadingContent = { Icon(Icons.Default.Hd, null, tint = Color(0xFFAAAAAA)) },
+                        supportingContent = if (!q.hasAudio) { { Text("Video only — no audio", style = MaterialTheme.typography.labelSmall, color = Color(0xFFFF8800)) } } else null,
+                        leadingContent = { Icon(Icons.Default.Hd, null, tint = if (q.hasAudio) Color.White else Color(0xFF888888)) },
                         modifier = Modifier.clickable {
                             showQualitySheet = false
                             activity?.reloadWithQuality(videoId, q.height)

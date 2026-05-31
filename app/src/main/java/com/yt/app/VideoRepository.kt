@@ -22,8 +22,15 @@ class VideoRepository(context: Context) {
 
     suspend fun getHomeFeed(): List<Video> = withContext(Dispatchers.IO) {
         val history = prefs.getHistory()
-        if (history.isEmpty()) YtWebClient.search("trending music").toVideos()
-        else YtWebClient.getRelated(history.first()).toVideos()
+        if (history.isEmpty()) {
+            YtWebClient.search("trending music videos 2024").toVideos()
+        } else {
+            // Try related from most recent watched video
+            val related = YtWebClient.getRelated(history.first()).toVideos()
+            // If related is empty, search based on last watched title
+            if (related.isNotEmpty()) related
+            else YtWebClient.search("trending").toVideos()
+        }
     }
 
     suspend fun getChannelFeed(): List<Video> = withContext(Dispatchers.IO) {

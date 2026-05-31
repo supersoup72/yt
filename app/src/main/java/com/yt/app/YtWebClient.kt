@@ -119,21 +119,28 @@ object YtWebClient {
         if (!json.has("streamingData")) return emptyList()
         val options = mutableListOf<QualityOption>()
         val seen = mutableSetOf<Int>()
-        fun scanArr(arr: JSONArray?) {
-            if (arr == null) return
+        val sd = json.getJSONObject("streamingData")
+
+        // Scan combined formats first (have audio) — mark them
+        sd.optJSONArray("formats")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val f = arr.getJSONObject(i)
                 if (!f.optString("mimeType").startsWith("video/mp4")) continue
                 val url = f.optString("url", ""); if (url.isBlank()) continue
                 val h = f.optInt("height", 0); if (h == 0 || seen.contains(h)) continue
-                seen.add(h); options.add(QualityOption("${h}p", h, url))
+                seen.add(h); options.add(QualityOption("${h}p", h, url, hasAudio = true))
             }
         }
-        val sd = json.getJSONObject("streamingData")
-        // Only scan `formats` (combined audio+video) for quality options
-        scanArr(sd.optJSONArray("formats"))
-        // If no combined formats found, fall back to adaptive
-        if (options.isEmpty()) scanArr(sd.optJSONArray("adaptiveFormats"))
+        // Also add adaptive heights not already listed (video-only, but higher res)
+        sd.optJSONArray("adaptiveFormats")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val f = arr.getJSONObject(i)
+                if (!f.optString("mimeType").startsWith("video/mp4")) continue
+                val url = f.optString("url", ""); if (url.isBlank()) continue
+                val h = f.optInt("height", 0); if (h == 0 || seen.contains(h)) continue
+                seen.add(h); options.add(QualityOption("${h}p ♪", h, url, hasAudio = false))
+            }
+        }
         return options.sortedByDescending { it.height }
     }
 
@@ -340,17 +347,28 @@ object YtWebClient {
 
     private fun parseRelatedResults(json: JSONObject): List<VideoResult> {
         val results = mutableListOf<VideoResult>()
+        // YouTube uses several renderer names for related videos
+        val rendererKeys = setOf("compactVideoRenderer", "videoRenderer", "endScreenVideoRenderer", "gridVideoRenderer")
         fun walk(obj: Any) {
             if (results.size >= 20) return
             when (obj) {
                 is JSONObject -> {
-                    val cr = obj.optJSONObject("compactVideoRenderer")
+                    var cr: JSONObject? = null
+                    for (key in rendererKeys) {
+                        cr = obj.optJSONObject(key)
+                        if (cr != null) break
+                    }
                     if (cr != null) {
                         val id = cr.optString("videoId").takeIf { it.isNotBlank() }
                         val title = cr.optJSONObject("title")?.optString("simpleText")
+                            ?: cr.optJSONObject("title")?.optJSONArray("runs")
+                                ?.optJSONObject(0)?.optString("text")
                         val ch = cr.optJSONObject("longBylineText")?.optJSONArray("runs")
-                            ?.optJSONObject(0)?.optString("text") ?: ""
-                        val views = cr.optJSONObject("viewCountText")?.optString("simpleText") ?: ""
+                            ?.optJSONObject(0)?.optString("text")
+                            ?: cr.optJSONObject("ownerText")?.optJSONArray("runs")
+                                ?.optJSONObject(0)?.optString("text") ?: ""
+                        val views = cr.optJSONObject("viewCountText")?.optString("simpleText")
+                            ?: cr.optJSONObject("shortViewCountText")?.optString("simpleText") ?: ""
                         val dur = cr.optJSONObject("lengthText")?.optString("simpleText") ?: ""
                         if (id != null && title != null) results.add(VideoResult(id, title, ch, views, dur))
                     }
@@ -359,7 +377,7 @@ object YtWebClient {
                 is JSONArray -> for (i in 0 until obj.length()) walk(obj.get(i))
             }
         }
-        try { walk(json) } catch (e: Exception) {}
+        try { walk(json) } catch (e: Exception) { Log.e(TAG, "parseRelated: ${e.message}") }
         return results
     }
 
@@ -377,5 +395,5 @@ object YtWebClient {
     )
 
     data class Comment(val author: String, val text: String, val likes: String, val avatarUrl: String)
-    data class QualityOption(val label: String, val height: Int, val url: String)
+    data class QualityOption(val label: String, val height: Int, val url: String, val hasAudio: Boolean = true)
 }
