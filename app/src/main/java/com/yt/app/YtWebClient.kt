@@ -130,31 +130,45 @@ object YtWebClient {
             }
         }
         val sd = json.getJSONObject("streamingData")
+        // Only scan `formats` (combined audio+video) for quality options
         scanArr(sd.optJSONArray("formats"))
-        scanArr(sd.optJSONArray("adaptiveFormats"))
+        // If no combined formats found, fall back to adaptive
+        if (options.isEmpty()) scanArr(sd.optJSONArray("adaptiveFormats"))
         return options.sortedByDescending { it.height }
     }
 
     private fun extractUrl(json: JSONObject, preferredHeight: Int = 0): String? {
         return try {
             val sd = json.getJSONObject("streamingData")
-            val candidates = mutableListOf<Pair<Int,String>>()
-            fun scan(arr: JSONArray?) {
+
+            // `formats` = combined audio+video streams (always prefer these)
+            // `adaptiveFormats` = video-only or audio-only (no sound if picked alone)
+            val combined = mutableListOf<Pair<Int,String>>()
+            val adaptive = mutableListOf<Pair<Int,String>>()
+
+            fun scan(arr: JSONArray?, bucket: MutableList<Pair<Int,String>>) {
                 if (arr == null) return
                 for (i in 0 until arr.length()) {
                     val f = arr.getJSONObject(i)
-                    if (!f.optString("mimeType").startsWith("video/mp4")) continue
+                    val mime = f.optString("mimeType", "")
+                    // Only combined streams have both video+audio; skip audio-only adaptive
+                    if (!mime.startsWith("video/mp4")) continue
                     val u = f.optString("url", ""); if (u.isBlank()) continue
-                    candidates.add(Pair(f.optInt("height", 0), u))
+                    bucket.add(Pair(f.optInt("height", 0), u))
                 }
             }
-            scan(sd.optJSONArray("formats"))
-            scan(sd.optJSONArray("adaptiveFormats"))
-            if (candidates.isEmpty()) return null
+
+            scan(sd.optJSONArray("formats"), combined)
+            scan(sd.optJSONArray("adaptiveFormats"), adaptive)
+
+            // Always pick from combined first (has audio), fall back to adaptive only if none
+            val pool = if (combined.isNotEmpty()) combined else adaptive
+            if (pool.isEmpty()) return null
+
             if (preferredHeight > 0) {
-                candidates.minByOrNull { Math.abs(it.first - preferredHeight) }?.second
+                pool.minByOrNull { Math.abs(it.first - preferredHeight) }?.second
             } else {
-                candidates.maxByOrNull { it.first }?.second
+                pool.maxByOrNull { it.first }?.second
             }
         } catch (e: Exception) { null }
     }
@@ -182,12 +196,38 @@ object YtWebClient {
     // ── Comments ──────────────────────────────────────────────────────────────
 
     fun getComments(videoId: String): List<Comment> {
-        val body = JSONObject().apply {
-            put("context", CONTEXT)
-            put("videoId", videoId)
-        }
+        // Step 1: get the /next response to find the comments continuation token
+        val body = JSONObject().apply { put("context", CONTEXT); put("videoId", videoId) }
         val json = post("next", body) ?: return emptyList()
-        return parseComments(json)
+
+        // Step 2: find continuation token inside engagementPanels
+        val token = findContinuationToken(json, "comments") ?: return emptyList()
+
+        // Step 3: fetch comments with the token
+        val body2 = JSONObject().apply { put("context", CONTEXT); put("continuation", token) }
+        val json2 = post("next", body2) ?: return emptyList()
+        return parseComments(json2)
+    }
+
+    private fun findContinuationToken(json: JSONObject, hint: String): String? {
+        var token: String? = null
+        fun walk(obj: Any) {
+            if (token != null) return
+            when (obj) {
+                is JSONObject -> {
+                    // continuationCommand is how Innertube passes section tokens
+                    val cc = obj.optJSONObject("continuationCommand")
+                    if (cc != null) {
+                        val t = cc.optString("token", "")
+                        if (t.isNotBlank()) { token = t; return }
+                    }
+                    obj.keys().forEach { k -> walk(obj.get(k)) }
+                }
+                is JSONArray -> for (i in 0 until obj.length()) walk(obj.get(i))
+            }
+        }
+        try { walk(json) } catch (e: Exception) { }
+        return token
     }
 
     private fun parseComments(json: JSONObject): List<Comment> {
@@ -200,10 +240,11 @@ object YtWebClient {
                     if (cr != null) {
                         val author = cr.optJSONObject("authorText")?.optString("simpleText") ?: ""
                         val text = cr.optJSONObject("contentText")?.optJSONArray("runs")
-                            ?.let { runs -> (0 until runs.length()).joinToString("") { runs.getJSONObject(it).optString("text") } } ?: ""
+                            ?.let { runs -> (0 until runs.length()).joinToString("") {
+                                runs.getJSONObject(it).optString("text") } } ?: ""
                         val likes = cr.optJSONObject("voteCount")?.optString("simpleText") ?: ""
-                        val avatar = cr.optJSONObject("authorThumbnail")?.optJSONArray("thumbnails")
-                            ?.optJSONObject(0)?.optString("url") ?: ""
+                        val avatar = cr.optJSONObject("authorThumbnail")
+                            ?.optJSONArray("thumbnails")?.optJSONObject(0)?.optString("url") ?: ""
                         if (author.isNotBlank() && text.isNotBlank())
                             results.add(Comment(author, text, likes, avatar))
                     }

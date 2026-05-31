@@ -156,8 +156,8 @@ fun VideoDetailScreen(
     val scope = rememberCoroutineScope()
 
     var detail by remember { mutableStateOf<YtWebClient.VideoDetail?>(null) }
-    var comments by remember { mutableStateOf<List<YtWebClient.Comment>>(emptyList()) }
-    var related by remember { mutableStateOf<List<Video>>(emptyList()) }
+    var comments by remember { mutableStateOf<List<YtWebClient.Comment>?>(null) }
+    var related by remember { mutableStateOf<List<Video>?>(null) }
     var qualities by remember { mutableStateOf<List<YtWebClient.QualityOption>>(emptyList()) }
     var showQualitySheet by remember { mutableStateOf(false) }
     var showDesc by remember { mutableStateOf(false) }
@@ -335,13 +335,19 @@ fun VideoDetailScreen(
                     Icon(Icons.Default.Comment, null, tint = Color.White, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Comments", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    if (comments.isEmpty()) {
+                    if (comments == null) {
                         Spacer(Modifier.width(8.dp))
                         CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     }
                 }
             }
-            items(comments.take(10)) { comment ->
+            if (comments != null && comments!!.isEmpty()) {
+                item {
+                    Text("No comments available", style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFAAAAAA), modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                }
+            }
+            items(comments?.take(10) ?: emptyList()) { comment ->
                 CommentRow(comment)
             }
 
@@ -353,13 +359,19 @@ fun VideoDetailScreen(
                     Icon(Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Up Next", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    if (related.isEmpty()) {
+                    if (related == null) {
                         Spacer(Modifier.width(8.dp))
                         CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     }
                 }
             }
-            items(related) { video ->
+            if (related != null && related!!.isEmpty()) {
+                item {
+                    Text("No recommendations available", style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFAAAAAA), modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                }
+            }
+            items(related ?: emptyList()) { video ->
                 RelatedVideoRow(video = video, onClick = { onVideoClick(video) })
             }
 
