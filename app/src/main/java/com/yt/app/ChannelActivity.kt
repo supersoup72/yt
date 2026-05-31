@@ -108,7 +108,7 @@ fun ChannelScreen(
                 Text("No videos found for this channel.", color = Color(0xFFAAAAAA))
             }
         } else {
-            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp, top = padding.calculateTopPadding())) {
+            LazyColumn(contentPadding = PaddingValues(top = padding.calculateTopPadding() + 8.dp, bottom = 8.dp)) {
                 items(videos) { video ->
                     VideoCard(video = video, repo = repo,
                         onPlay = { onVideoClick(video) }, onRelated = {})
