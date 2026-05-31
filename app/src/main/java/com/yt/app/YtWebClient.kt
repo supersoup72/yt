@@ -203,38 +203,50 @@ object YtWebClient {
     // ── Comments ──────────────────────────────────────────────────────────────
 
     fun getComments(videoId: String): List<Comment> {
-        // Step 1: get the /next response to find the comments continuation token
         val body = JSONObject().apply { put("context", CONTEXT); put("videoId", videoId) }
         val json = post("next", body) ?: return emptyList()
 
-        // Step 2: find continuation token inside engagementPanels
-        val token = findContinuationToken(json, "comments") ?: return emptyList()
+        // Comments token lives inside engagementPanels — find the one with "comments" in its id
+        val token = findCommentsPanelToken(json) ?: return emptyList()
 
-        // Step 3: fetch comments with the token
         val body2 = JSONObject().apply { put("context", CONTEXT); put("continuation", token) }
         val json2 = post("next", body2) ?: return emptyList()
         return parseComments(json2)
     }
 
-    private fun findContinuationToken(json: JSONObject, hint: String): String? {
-        var token: String? = null
-        fun walk(obj: Any) {
-            if (token != null) return
-            when (obj) {
-                is JSONObject -> {
-                    // continuationCommand is how Innertube passes section tokens
-                    val cc = obj.optJSONObject("continuationCommand")
-                    if (cc != null) {
-                        val t = cc.optString("token", "")
-                        if (t.isNotBlank()) { token = t; return }
+    private fun findCommentsPanelToken(json: JSONObject): String? {
+        // YouTube puts comments in engagementPanels array
+        // Each panel has a panelIdentifier — we want "engagement-panel-comments-section"
+        try {
+            val panels = json.optJSONArray("engagementPanels") ?: return null
+            for (i in 0 until panels.length()) {
+                val panel = panels.getJSONObject(i)
+                    .optJSONObject("engagementPanelSectionListRenderer") ?: continue
+                val id = panel.optString("panelIdentifier", "")
+                if (!id.contains("comment", ignoreCase = true)) continue
+                // Found comments panel — now dig for the continuation token inside
+                var token: String? = null
+                fun walkForToken(obj: Any) {
+                    if (token != null) return
+                    when (obj) {
+                        is JSONObject -> {
+                            val t = obj.optJSONObject("reloadContinuationData")
+                                ?.optString("continuation", "")
+                                ?.takeIf { it.isNotBlank() }
+                                ?: obj.optJSONObject("continuationCommand")
+                                    ?.optString("token", "")
+                                    ?.takeIf { it.isNotBlank() }
+                            if (t != null) { token = t; return }
+                            obj.keys().forEach { k -> walkForToken(obj.get(k)) }
+                        }
+                        is JSONArray -> for (j in 0 until obj.length()) walkForToken(obj.get(j))
                     }
-                    obj.keys().forEach { k -> walk(obj.get(k)) }
                 }
-                is JSONArray -> for (i in 0 until obj.length()) walk(obj.get(i))
+                walkForToken(panel)
+                if (token != null) return token
             }
-        }
-        try { walk(json) } catch (e: Exception) { }
-        return token
+        } catch (e: Exception) { Log.e(TAG, "findCommentsPanelToken: ${e.message}") }
+        return null
     }
 
     private fun parseComments(json: JSONObject): List<Comment> {

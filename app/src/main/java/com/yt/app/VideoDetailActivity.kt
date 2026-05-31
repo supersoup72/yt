@@ -1,7 +1,9 @@
 package com.yt.app
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
@@ -38,6 +40,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.yt.app.data.Video
@@ -52,12 +55,15 @@ class VideoDetailActivity : ComponentActivity() {
 
     private lateinit var player: ExoPlayer
     private lateinit var repo: VideoRepository
+    private var videoId: String = ""
 
+    // Shared player instance across portrait/landscape via companion
     companion object {
         const val EXTRA_VIDEO_ID    = "video_id"
         const val EXTRA_VIDEO_TITLE = "video_title"
         const val EXTRA_CHANNEL     = "channel"
         const val EXTRA_VIEWS       = "views"
+        const val EXTRA_FULLSCREEN  = "fullscreen"
 
         fun start(context: Context, video: Video) {
             context.startActivity(Intent(context, VideoDetailActivity::class.java).apply {
@@ -74,17 +80,18 @@ class VideoDetailActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         repo = VideoRepository(this)
 
-        val videoId    = intent.getStringExtra(EXTRA_VIDEO_ID) ?: run { finish(); return }
-        val videoTitle = intent.getStringExtra(EXTRA_VIDEO_TITLE) ?: ""
-        val channel    = intent.getStringExtra(EXTRA_CHANNEL) ?: ""
-        val views      = intent.getStringExtra(EXTRA_VIEWS) ?: ""
+        videoId            = intent.getStringExtra(EXTRA_VIDEO_ID) ?: run { finish(); return }
+        val videoTitle     = intent.getStringExtra(EXTRA_VIDEO_TITLE) ?: ""
+        val channel        = intent.getStringExtra(EXTRA_CHANNEL) ?: ""
+        val views          = intent.getStringExtra(EXTRA_VIEWS) ?: ""
+        val startFullscreen = intent.getBooleanExtra(EXTRA_FULLSCREEN, false)
 
         repo.prefs.addHistory(videoId)
 
         val httpDs = DefaultHttpDataSource.Factory()
             .setUserAgent("com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_4 like Mac OS X)")
             .setDefaultRequestProperties(mapOf(
-                "Origin" to "https://www.youtube.com",
+                "Origin"  to "https://www.youtube.com",
                 "Referer" to "https://www.youtube.com/"))
             .setConnectTimeoutMs(15000).setReadTimeoutMs(15000)
 
@@ -92,54 +99,75 @@ class VideoDetailActivity : ComponentActivity() {
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpDs))
             .build()
 
+        if (startFullscreen) enterFullscreen()
+
         setContent {
             YtAppTheme {
                 VideoDetailScreen(
-                    videoId = videoId,
-                    initialTitle = videoTitle,
+                    videoId        = videoId,
+                    initialTitle   = videoTitle,
                     initialChannel = channel,
-                    initialViews = views,
-                    player = player,
-                    repo = repo,
-                    onVideoClick = { v -> start(this, v) },
-                    onChannelClick = { channelId ->
-                        ChannelActivity.start(this, channelId)
-                    }
+                    initialViews   = views,
+                    player         = player,
+                    repo           = repo,
+                    isFullscreen   = startFullscreen,
+                    onVideoClick   = { v -> start(this, v) },
+                    onChannelClick = { cid -> ChannelActivity.start(this, cid) },
+                    onFullscreen   = { enterFullscreen() },
+                    onExitFullscreen = { exitFullscreen() }
                 )
             }
         }
 
-        // Load stream
-        lifecycleScope.launch {
-            loadStream(videoId, 0)
-        }
+        lifecycleScope.launch { loadStream(videoId) }
     }
 
-    private suspend fun loadStream(videoId: String, preferredHeight: Int) {
-        val url = repo.getStreamUrl(videoId, preferredHeight)
+    private suspend fun loadStream(videoId: String, directUrl: String? = null) {
+        val url = directUrl ?: repo.getStreamUrl(videoId)
         withContext(Dispatchers.Main) {
             if (url != null) {
+                val pos = player.currentPosition
                 player.setMediaItem(MediaItem.fromUri(url))
                 player.prepare()
+                if (pos > 0) player.seekTo(pos)
                 player.playWhenReady = true
             } else {
-                Toast.makeText(this@VideoDetailActivity,
-                    "Stream error: ${YtWebClient.lastStreamError}", Toast.LENGTH_LONG).show()
+                android.app.AlertDialog.Builder(this@VideoDetailActivity)
+                    .setTitle("Stream Error")
+                    .setMessage(YtWebClient.lastStreamError.ifBlank { "Could not load video." })
+                    .setPositiveButton("OK") { _, _ -> }
+                    .show()
             }
         }
     }
 
-    fun reloadWithQuality(videoId: String, height: Int) {
+    // Called from quality sheet with the direct URL for that quality
+    fun reloadWithUrl(url: String) {
         player.stop()
-        lifecycleScope.launch { loadStream(videoId, height) }
+        lifecycleScope.launch { loadStream(videoId, url) }
+    }
+
+    private fun enterFullscreen() {
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        )
+    }
+
+    private fun exitFullscreen() {
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
     }
 
     override fun onPause()   { super.onPause();   player.pause() }
-    override fun onResume()  { super.onResume();  player.play() }
+    override fun onResume()  { super.onResume();  if (player.playbackState != Player.STATE_IDLE) player.play() }
     override fun onDestroy() { super.onDestroy(); player.release() }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun VideoDetailScreen(
     videoId: String,
@@ -148,32 +176,34 @@ fun VideoDetailScreen(
     initialViews: String,
     player: ExoPlayer,
     repo: VideoRepository,
+    isFullscreen: Boolean,
     onVideoClick: (Video) -> Unit,
-    onChannelClick: (String) -> Unit
+    onChannelClick: (String) -> Unit,
+    onFullscreen: () -> Unit,
+    onExitFullscreen: () -> Unit
 ) {
-    val context = LocalContext.current
+    val context  = LocalContext.current
     val activity = context as? VideoDetailActivity
-    val scope = rememberCoroutineScope()
+    val scope    = rememberCoroutineScope()
 
-    var detail by remember { mutableStateOf<YtWebClient.VideoDetail?>(null) }
-    var comments by remember { mutableStateOf<List<YtWebClient.Comment>?>(null) }
-    var related by remember { mutableStateOf<List<Video>?>(null) }
-    var qualities by remember { mutableStateOf<List<YtWebClient.QualityOption>>(emptyList()) }
+    var detail          by remember { mutableStateOf<YtWebClient.VideoDetail?>(null) }
+    var comments        by remember { mutableStateOf<List<YtWebClient.Comment>?>(null) }
+    var related         by remember { mutableStateOf<List<Video>?>(null) }
+    var qualities       by remember { mutableStateOf<List<YtWebClient.QualityOption>>(emptyList()) }
     var showQualitySheet by remember { mutableStateOf(false) }
-    var showDesc by remember { mutableStateOf(false) }
-    var isLiked by remember { mutableStateOf(repo.prefs.isLiked(videoId)) }
-    var isSub by remember { mutableStateOf(false) }
-    var descExpanded by remember { mutableStateOf(false) }
+    var isLiked         by remember { mutableStateOf(repo.prefs.isLiked(videoId)) }
+    var isSub           by remember { mutableStateOf(false) }
+    var descExpanded    by remember { mutableStateOf(false) }
+    var fullscreen      by remember { mutableStateOf(isFullscreen) }
 
     LaunchedEffect(videoId) {
-        launch { detail = repo.getVideoDetail(videoId) }
-        launch { comments = repo.getComments(videoId) }
-        launch { related = repo.getRelated(videoId) }
+        launch { detail    = repo.getVideoDetail(videoId) }
+        launch { comments  = repo.getComments(videoId) }
+        launch { related   = repo.getRelated(videoId) }
         launch { qualities = repo.getQualities(videoId) }
     }
-
     LaunchedEffect(detail) {
-        detail?.channelId?.let { cid -> isSub = repo.prefs.isSub(cid) }
+        detail?.channelId?.let { isSub = repo.prefs.isSub(it) }
     }
 
     val title    = detail?.title ?: initialTitle
@@ -182,6 +212,31 @@ fun VideoDetailScreen(
     val viewsFmt = viewsRaw.toLongOrNull()?.let {
         NumberFormat.getNumberInstance(Locale.US).format(it) + " views"
     } ?: viewsRaw
+
+    // Fullscreen: show only the player
+    if (fullscreen) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        this.player = player
+                        useController = true
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+            // Exit fullscreen button
+            IconButton(
+                onClick = { fullscreen = false; onExitFullscreen() },
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
+            ) {
+                Icon(Icons.Default.FullscreenExit, "Exit Fullscreen",
+                    tint = Color.White, modifier = Modifier.size(28.dp))
+            }
+        }
+        return
+    }
 
     Scaffold(
         topBar = {
@@ -192,13 +247,7 @@ fun VideoDetailScreen(
                         Icon(Icons.Default.ArrowBack, "Back")
                     }
                 },
-                actions = {
-                    IconButton(onClick = { showQualitySheet = true }) {
-                        Icon(Icons.Default.Tune, "Quality")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF0F0F0F))
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF0F0F0F))
             )
         }
     ) { padding ->
@@ -206,44 +255,50 @@ fun VideoDetailScreen(
 
             // ── Player ──────────────────────────────────────────────────────
             item {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            this.player = player
-                            useController = true
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-                        .background(Color.Black)
-                )
+                Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color.Black)) {
+                    AndroidView(
+                        factory = { ctx ->
+                            PlayerView(ctx).apply {
+                                this.player = player
+                                useController = true
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    // Fullscreen button overlay
+                    IconButton(
+                        onClick = { fullscreen = true; onFullscreen() },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp)
+                    ) {
+                        Icon(Icons.Default.Fullscreen, "Fullscreen",
+                            tint = Color.White, modifier = Modifier.size(24.dp))
+                    }
+                }
             }
 
             // ── Title & views ────────────────────────────────────────────────
             item {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                     Text(title, style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold, maxLines = if (descExpanded) Int.MAX_VALUE else 2,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = if (descExpanded) Int.MAX_VALUE else 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.clickable { descExpanded = !descExpanded })
                     Spacer(Modifier.height(4.dp))
-                    Text(viewsFmt, style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFAAAAAA))
+                    Text(viewsFmt, style = MaterialTheme.typography.bodySmall, color = Color(0xFFAAAAAA))
                 }
             }
 
-            // ── Action row: Like, Save, Share ────────────────────────────────
+            // ── Action row ───────────────────────────────────────────────────
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
+                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly) {
                     ActionChip(
-                        icon = if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        icon  = if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                         label = if (isLiked) "Liked" else "Like",
-                        tint = if (isLiked) Color.Red else Color.White
-                    ) {
-                        isLiked = repo.prefs.toggleLike(videoId)
-                    }
+                        tint  = if (isLiked) Color.Red else Color.White
+                    ) { isLiked = repo.prefs.toggleLike(videoId) }
+
                     ActionChip(Icons.Default.Download, "Save") {
                         scope.launch {
                             val dir = android.os.Environment.getExternalStoragePublicDirectory(
@@ -254,29 +309,27 @@ fun VideoDetailScreen(
                         }
                     }
                     ActionChip(Icons.Default.Share, "Share") {
-                        val intent = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, "https://youtu.be/$videoId")
-                        }
-                        context.startActivity(Intent.createChooser(intent, "Share video"))
+                        context.startActivity(Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, "https://youtu.be/$videoId")
+                            }, "Share video"))
                     }
                     ActionChip(Icons.Default.Tune, "Quality") { showQualitySheet = true }
+                    ActionChip(Icons.Default.Fullscreen, "Full") { fullscreen = true; onFullscreen() }
                 }
                 Divider(color = Color(0xFF222222), modifier = Modifier.padding(vertical = 8.dp))
             }
 
             // ── Channel row ──────────────────────────────────────────────────
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
-                        .clickable { detail?.channelId?.let { onChannelClick(it) } },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier.size(40.dp).clip(CircleShape)
-                            .background(Color(0xFF333333)),
-                        contentAlignment = Alignment.Center
-                    ) {
+                Row(modifier = Modifier.fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .clickable { detail?.channelId?.let { onChannelClick(it) } },
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(40.dp).clip(CircleShape)
+                        .background(Color(0xFF333333)),
+                        contentAlignment = Alignment.Center) {
                         Text(ch.firstOrNull()?.toString() ?: "C",
                             color = Color.White, fontWeight = FontWeight.Bold)
                     }
@@ -296,7 +349,7 @@ fun VideoDetailScreen(
                         },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isSub) Color(0xFF333333) else Color.White,
-                            contentColor = if (isSub) Color.White else Color.Black),
+                            contentColor   = if (isSub) Color.White else Color.Black),
                         shape = RoundedCornerShape(20.dp),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
                     ) {
@@ -311,17 +364,13 @@ fun VideoDetailScreen(
             if (detail?.description?.isNotBlank() == true) {
                 item {
                     Column(modifier = Modifier.padding(horizontal = 16.dp)
-                        .clickable { showDesc = !showDesc }) {
-                        Text(
-                            text = detail!!.description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFCCCCCC),
-                            maxLines = if (showDesc) Int.MAX_VALUE else 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(if (showDesc) "Show less" else "...more",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFAAAAAA),
+                        .clickable { descExpanded = !descExpanded }) {
+                        Text(detail!!.description,
+                            style = MaterialTheme.typography.bodySmall, color = Color(0xFFCCCCCC),
+                            maxLines = if (descExpanded) Int.MAX_VALUE else 2,
+                            overflow = TextOverflow.Ellipsis)
+                        Text(if (descExpanded) "Show less" else "...more",
+                            style = MaterialTheme.typography.labelSmall, color = Color(0xFFAAAAAA),
                             modifier = Modifier.padding(top = 4.dp))
                     }
                     Divider(color = Color(0xFF222222), modifier = Modifier.padding(vertical = 8.dp))
@@ -343,13 +392,12 @@ fun VideoDetailScreen(
             }
             if (comments != null && comments!!.isEmpty()) {
                 item {
-                    Text("No comments available", style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFAAAAAA), modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                    Text("No comments available",
+                        style = MaterialTheme.typography.bodySmall, color = Color(0xFFAAAAAA),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                 }
             }
-            items(comments?.take(10) ?: emptyList()) { comment ->
-                CommentRow(comment)
-            }
+            items(comments?.take(10) ?: emptyList()) { comment -> CommentRow(comment) }
 
             // ── Up next ───────────────────────────────────────────────────────
             item {
@@ -367,8 +415,9 @@ fun VideoDetailScreen(
             }
             if (related != null && related!!.isEmpty()) {
                 item {
-                    Text("No recommendations available", style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFAAAAAA), modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                    Text("No recommendations available",
+                        style = MaterialTheme.typography.bodySmall, color = Color(0xFFAAAAAA),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                 }
             }
             items(related ?: emptyList()) { video ->
@@ -395,11 +444,18 @@ fun VideoDetailScreen(
                 qualities.forEach { q ->
                     ListItem(
                         headlineContent = { Text(q.label) },
-                        supportingContent = if (!q.hasAudio) { { Text("Video only — no audio", style = MaterialTheme.typography.labelSmall, color = Color(0xFFFF8800)) } } else null,
-                        leadingContent = { Icon(Icons.Default.Hd, null, tint = if (q.hasAudio) Color.White else Color(0xFF888888)) },
+                        supportingContent = if (!q.hasAudio) { {
+                            Text("Video only — no audio", style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFFF8800))
+                        } } else null,
+                        leadingContent = {
+                            Icon(Icons.Default.Hd, null,
+                                tint = if (q.hasAudio) Color.White else Color(0xFF888888))
+                        },
                         modifier = Modifier.clickable {
                             showQualitySheet = false
-                            activity?.reloadWithQuality(videoId, q.height)
+                            // Use the direct URL from the quality option — no re-fetch needed
+                            activity?.reloadWithUrl(q.url)
                         },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent)
                     )
@@ -422,7 +478,7 @@ private fun ActionChip(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(22.dp))
         Spacer(Modifier.height(2.dp))
@@ -433,10 +489,8 @@ private fun ActionChip(
 @Composable
 private fun CommentRow(comment: YtWebClient.Comment) {
     Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-        Box(
-            modifier = Modifier.size(32.dp).clip(CircleShape).background(Color(0xFF444444)),
-            contentAlignment = Alignment.Center
-        ) {
+        Box(modifier = Modifier.size(32.dp).clip(CircleShape).background(Color(0xFF444444)),
+            contentAlignment = Alignment.Center) {
             if (comment.avatarUrl.isNotBlank()) {
                 AsyncImage(model = comment.avatarUrl, contentDescription = null,
                     modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
@@ -467,23 +521,18 @@ private fun CommentRow(comment: YtWebClient.Comment) {
 
 @Composable
 private fun RelatedVideoRow(video: Video, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
+    Row(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+        .padding(horizontal = 12.dp, vertical = 6.dp)) {
         Box {
             AsyncImage(
-                model = video.thumbnailUrl,
-                contentDescription = video.title,
+                model = video.thumbnailUrl, contentDescription = video.title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.width(160.dp).height(90.dp).clip(RoundedCornerShape(8.dp))
             )
             if (video.duration.isNotBlank()) {
-                Box(
-                    modifier = Modifier.align(Alignment.BottomEnd)
-                        .padding(4.dp).background(Color(0xCC000000), RoundedCornerShape(3.dp))
-                        .padding(horizontal = 4.dp, vertical = 1.dp)
-                ) {
+                Box(modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(3.dp))
+                    .padding(horizontal = 4.dp, vertical = 1.dp)) {
                     Text(video.duration, style = MaterialTheme.typography.labelSmall, color = Color.White)
                 }
             }
